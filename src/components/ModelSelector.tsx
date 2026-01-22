@@ -45,15 +45,18 @@ export function ModelSelector() {
         <DropdownMenuTrigger asChild>
           <Button
             variant="outline"
-            className="bg-black/60 border-cyan-500/30 text-cyan-400 hover:bg-black/80 hover:text-cyan-300 backdrop-blur-md"
+            size="sm"
+            className="bg-black/60 border-cyan-500/30 text-cyan-400 hover:bg-black/80 hover:text-cyan-300 backdrop-blur-md h-9 px-3"
           >
-            <UserCog className="w-4 h-4 mr-2" />
-            {currentName}
+            <UserCog className="h-4 w-4 mr-2" />
+            <span className="hidden sm:inline">{currentName}</span>
+            <span className="sm:hidden">Model</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
           className="bg-black/90 border-cyan-500/30 text-white backdrop-blur-xl max-h-[80vh] w-75 overflow-y-auto p-4"
           sideOffset={8}
+          align="end"
         >
           <DropdownMenuLabel className="text-cyan-400 font-bold mb-2">
             Select Model

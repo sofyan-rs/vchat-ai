@@ -13,30 +13,44 @@ import * as THREE from "three";
 import { type VRMModelId } from "@/lib/models";
 import { avatarState } from "@/lib/avatar-state";
 
+// Helper for more natural movement (Fractal Noise simulation using Primes)
+// Combining sine waves at prime frequencies prevents noticeable looping.
+const naturalSine = (t: number, speed: number) => {
+  return (Math.sin(t * speed) + Math.sin(t * speed * 1.3) * 0.5) / 1.5;
+};
+
 export function Avatar() {
   const [vrm, setVrm] = useState<VRM | null>(null);
   const [modelId, setModelId] = useState<VRMModelId>(
     avatarState.currentModelId,
   );
+
+  // Memoize state object to prevent garbage collection churn
   const [transforms, setTransforms] = useState({
     position: avatarState.position,
     rotation: avatarState.rotation,
     scale: avatarState.scale,
   });
+  
+  const [isDancing, setIsDancing] = useState(avatarState.isDancing);
+  const [isJumping, setIsJumping] = useState(avatarState.isJumping);
+  const [isWaving, setIsWaving] = useState(avatarState.isWaving);
 
+  // REFINED BLINK STATE
   const blinkState = useRef({
     isBlinking: false,
-    blinkProgress: 0,
-    nextBlinkDelay: 2, // Initial delay in seconds
+    blinkPhase: 0, // 0 to 1
+    nextBlinkDelay: 2,
+    closing: true, // Track direction for asymmetric speed
   });
 
   const talkingState = useRef({
     intensity: 0,
-    time: 0,
+    mouthTarget: 0, // For smoothing lip sync
   });
 
+  // --- MODEL SUBSCRIPTION ---
   useEffect(() => {
-    // Subscribe to model changes
     const unsubscribe = avatarState.subscribe(() => {
       setModelId(avatarState.currentModelId);
       setTransforms({
@@ -44,302 +58,384 @@ export function Avatar() {
         rotation: avatarState.rotation,
         scale: avatarState.scale,
       });
+      setIsDancing(avatarState.isDancing);
+      setIsJumping(avatarState.isJumping);
+      setIsWaving(avatarState.isWaving);
     });
     return unsubscribe;
   }, []);
 
+  // --- LOADER ---
   useEffect(() => {
-    // Clean up previous VRM if exists
-    // We do this cleanup inside a cleanup function or before loading new one, but
-    // setting state here triggers a re-render.
-    // Instead of setVrm(null) immediately which triggers the error, we can just rely on the new loader overwriting it.
-    // Or if we really want to clear it, we should do it in a cleanup function of the previous effect, or just let the new one replace it.
+    // Cleanup previous model properly
+    if (vrm) {
+      VRMUtils.removeUnnecessaryJoints(vrm.scene);
+      // Optional: dispose materials/geometries if memory is tight
+    }
 
-    // Actually, the best way to handle "unmounting" the old model is the cleanup function of THIS effect.
-    return () => {
-      if (vrm) {
-        VRMUtils.removeUnnecessaryJoints(vrm.scene);
-        // We don't need to setVrm(null) here because the component is unmounting or dependency changing
-        // and the next render cycle will initialize or the new effect run will handle it.
-        // But if we want to visually clear it while loading, we should use a separate loading state.
-      }
-    };
-  }, [vrm]); // Add vrm as dependency for cleanup
-
-  useEffect(() => {
     const loader = new GLTFLoader();
-
-    // Explicitly configure the plugin
-    loader.register((parser) => {
-      return new VRMLoaderPlugin(parser, {
-        autoUpdateHumanBones: true,
-      });
-    });
+    loader.register(
+      (parser) => new VRMLoaderPlugin(parser, { autoUpdateHumanBones: true }),
+    );
 
     console.log(`Loading VRM: /vrm/${modelId}`);
 
     loader.load(
       `/vrm/${modelId}`,
       (gltf) => {
-        const vrm = gltf.userData.vrm;
+        const loadedVrm = gltf.userData.vrm;
 
-        // Disable frustum culling to prevent model disappearing
-        vrm.scene.traverse((obj: THREE.Object3D) => {
+        // Optimization: Only traverse once
+        loadedVrm.scene.traverse((obj: THREE.Object3D) => {
           obj.frustumCulled = false;
         });
 
-        VRMUtils.rotateVRM0(vrm); // Fix rotation for VRM 0.x models if needed
+        VRMUtils.rotateVRM0(loadedVrm);
 
-        // --- APPLY DEFAULT POSE ---
-        const humanBones = vrm.humanoid;
+        // Initial Pose Setup (T-Pose to Neutral)
+        const humanBones = loadedVrm.humanoid;
 
-        // Arms - relaxed at sides
-        // REVERSED rotation direction based on user feedback
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.LeftUpperArm,
-        )!.rotation.z = Math.PI / 3.0; // Reduced from 2.5 to 3.0 to lower the A-pose lift
+        // Helper to safely set rotation
+        const setRot = (bone: string, x: number, y: number, z: number) => {
+          const node = humanBones.getNormalizedBoneNode(bone as any);
+          if (node) node.rotation.set(x, y, z);
+        };
 
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.RightUpperArm,
-        )!.rotation.z = -Math.PI / 3.0;
+        // Apply static fixes once
+        setRot(VRMHumanBoneName.Hips, 0, 0, 0);
+        setRot(VRMHumanBoneName.LeftUpperLeg, 0, 0, 0);
+        setRot(VRMHumanBoneName.RightUpperLeg, 0, 0, 0);
 
-        // Fix for "skirt lifting" / weird leg interaction
-        // Sometimes if the default pose is too compressed, clothes physics (spring bones) can freak out
-        // Let's ensure the legs are in a neutral standing pose
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.LeftUpperLeg,
-        )!.rotation.z = 0;
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.RightUpperLeg,
-        )!.rotation.z = 0;
-
-        // Reset any weird hip rotation
-        const hips = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Hips);
-        if (hips) {
-          hips.rotation.set(0, 0, 0);
-        }
-
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.LeftLowerArm,
-        )!.rotation.z = -0.1;
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.RightLowerArm,
-        )!.rotation.z = 0.1;
-
-        // Hands - relaxed
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.LeftHand,
-        )!.rotation.z = -0.1;
-        humanBones.getNormalizedBoneNode(
-          VRMHumanBoneName.RightHand,
-        )!.rotation.z = 0.1;
-
-        setVrm(vrm);
-        console.log("VRM loaded:", vrm);
+        setVrm(loadedVrm);
       },
-      (progress) =>
-        console.log(
-          "Loading model...",
-          100.0 * (progress.loaded / progress.total),
-          "%",
-        ),
+      undefined,
       (error) => console.error("Error loading VRM:", error),
     );
   }, [modelId]);
 
-  // VRM requires an update loop for physics (hair, clothes, etc.)
-  useFrame((_state, delta) => {
-    if (vrm) {
-      // --- BLINK LOGIC ---
-      const bs = blinkState.current;
-      const currentEmotion = expressionState.currentEmotion;
+  // --- ANIMATION LOOP ---
+  useFrame((state, delta) => {
+    if (!vrm) return;
 
-      // Disable blinking if eyes are closed due to emotion (happy, sad, sleeping)
-      // "happy" usually closes eyes in anime style (^_^), same for "sad" (T_T) sometimes.
-      // We will assume "happy" and "sad" might involve closed eyes, so we pause blinking.
-      // But actually, let's just pause it for 'happy' and 'sleeping' (if we had it).
-      // For now, let's just say if emotion is 'happy' (often ^_^) or 'sleeping', we skip blink logic.
-      const shouldBlink =
-        currentEmotion !== "happy" && currentEmotion !== "sad";
+    const t = state.clock.elapsedTime;
+    const humanBones = vrm.humanoid;
+    const currentEmotion = expressionState.currentEmotion;
 
-      if (shouldBlink) {
-        if (bs.isBlinking) {
-          // Animate blink: 0 -> PI (sin(0)=0, sin(PI/2)=1, sin(PI)=0)
-          bs.blinkProgress += delta * 15; // Speed of blink
+    // 1. ORGANIC BLINKING
+    // Logic: Snap close fast, hold briefly, open slightly slower.
+    const bs = blinkState.current;
+    const shouldStopBlinking = currentEmotion === "happy";
 
-          if (bs.blinkProgress >= Math.PI) {
-            bs.isBlinking = false;
-            bs.blinkProgress = 0;
-            bs.nextBlinkDelay = Math.random() * 3 + 1; // Random delay 1-4s
-            if (vrm.expressionManager) {
-              vrm.expressionManager.setValue("blink", 0);
-            }
-          } else {
-            const blinkValue = Math.sin(bs.blinkProgress);
-            if (vrm.expressionManager) {
-              vrm.expressionManager.setValue("blink", blinkValue);
-            }
-          }
-        } else {
-          bs.nextBlinkDelay -= delta;
-          if (bs.nextBlinkDelay <= 0) {
-            bs.isBlinking = true;
-            bs.blinkProgress = 0;
-          }
-        }
-      } else {
-        // If we shouldn't blink, ensure blink is 0 so we don't get stuck half-blinked
-        if (vrm.expressionManager) {
-          vrm.expressionManager.setValue("blink", 0);
-        }
-        bs.isBlinking = false;
+    if (!shouldStopBlinking) {
+      bs.nextBlinkDelay -= delta;
+
+      if (bs.nextBlinkDelay <= 0 && !bs.isBlinking) {
+        bs.isBlinking = true;
+        bs.closing = true;
+        bs.blinkPhase = 0;
       }
 
-      // --- LIP SYNC LOGIC ---
-      const isTalking = audioState.volume > 0.01;
-      const ts = talkingState.current;
+      if (bs.isBlinking) {
+        // Speed: Close fast (15), Open slower (8)
+        const speed = bs.closing ? 15 : 8;
+        bs.blinkPhase += delta * speed;
 
-      // Smoothly transition talking intensity
-      const targetIntensity = isTalking ? 1.0 : 0.0;
-      ts.intensity = THREE.MathUtils.lerp(
-        ts.intensity,
-        targetIntensity,
-        delta * 5,
-      ); // Fast transition
-
-      if (vrm.expressionManager) {
-        // 1. Lip Sync
-        // Boost sensitivity significantly so normal speech volume triggers full mouth opening
-        const targetOpen = Math.min(1.0, audioState.volume * 4.0);
-        const currentOpen = vrm.expressionManager.getValue("aa");
-
-        // Increase smoothing factor slightly (25 -> 20) to make it a tiny bit slower/smoother
-        const smoothedOpen = THREE.MathUtils.lerp(
-          currentOpen || 0,
-          targetOpen,
-          1 - Math.exp(-delta * 20),
-        );
-
-        vrm.expressionManager.setValue("aa", smoothedOpen);
-
-        // 2. Emotional Expressions
-        // Smoothly blend to the target emotion
-        const currentEmotion = expressionState.currentEmotion;
-
-        // Define standard VRM blendshapes for emotions
-        const emotionMap: Record<string, string> = {
-          happy: "happy",
-          angry: "angry",
-          sad: "sad",
-          surprised: "surprised",
-          relaxed: "relaxed",
-          neutral: "neutral",
-        };
-
-        // We only want to set the active one, and fade out others
-        // Iterate through all known emotions
-        Object.values(emotionMap).forEach((emotionName) => {
-          if (emotionName === "neutral") return; // Neutral is default (all 0)
-
-          const targetValue = currentEmotion === emotionName ? 1.0 : 0.0;
-          const currentValue =
-            vrm?.expressionManager?.getValue(emotionName) || 0;
-
-          // Smooth transition
-          const newValue = THREE.MathUtils.lerp(
-            currentValue,
-            targetValue,
-            delta * 3,
+        if (bs.closing) {
+          if (bs.blinkPhase >= 1) {
+            bs.closing = false;
+            bs.blinkPhase = 0; // Reset for opening
+          }
+          // Ease in cubic for snappy close
+          vrm.expressionManager?.setValue(
+            "blink",
+            THREE.MathUtils.smoothstep(bs.blinkPhase, 0, 1),
           );
-
-          // Only set if supported
-          if (vrm?.expressionManager?.getExpression(emotionName)) {
-            vrm?.expressionManager?.setValue(emotionName, newValue);
+        } else {
+          // Opening
+          if (bs.blinkPhase >= 1) {
+            bs.isBlinking = false;
+            // Weighted random delay (mostly 3-4s, occasionally shorter)
+            bs.nextBlinkDelay =
+              Math.random() > 0.8 ? 0.5 : 2 + Math.random() * 3;
+            vrm.expressionManager?.setValue("blink", 0);
+          } else {
+            vrm.expressionManager?.setValue(
+              "blink",
+              1 - THREE.MathUtils.smoothstep(bs.blinkPhase, 0, 1),
+            );
           }
-        });
+        }
       }
+    } else {
+      // If emotion overrides eyes (e.g., Happy ^_^), reset blink
+      if (bs.isBlinking) {
+        bs.isBlinking = false;
+        vrm.expressionManager?.setValue("blink", 0);
+      }
+    }
 
-      // --- IDLE ANIMATION LOGIC ---
-      const t = _state.clock.elapsedTime;
-      const humanBones = vrm.humanoid;
+    // 2. REFINED LIP SYNC
+    const rawVolume = audioState.volume;
+    const ts = talkingState.current;
 
-      // 1. Breathing (Spine/Chest)
-      // Gentle expansion/contraction
-      const spine = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Spine);
-      const chest = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Chest);
-      const upperChest = humanBones.getNormalizedBoneNode(
-        VRMHumanBoneName.UpperChest,
+    // Noise Gate: Ignore volume below 0.05 to prevent jitter
+    const isTalking = rawVolume > 0.05;
+
+    // Smooth transition for "Is Talking" intensity (used for gestures)
+    ts.intensity = THREE.MathUtils.lerp(
+      ts.intensity,
+      isTalking ? 1.0 : 0.0,
+      delta * 8,
+    );
+
+    if (vrm.expressionManager) {
+      // Calculate target mouth open amount
+      // Multiplier reduced slightly to prevent over-extension
+      let targetMouth = Math.min(1.0, rawVolume * 3.5);
+      if (rawVolume < 0.05) targetMouth = 0;
+
+      // Asymmetric Smoothing: Open fast, close smooth
+      const smoothingFactor = targetMouth > ts.mouthTarget ? 25 : 10;
+      ts.mouthTarget = THREE.MathUtils.lerp(
+        ts.mouthTarget,
+        targetMouth,
+        delta * smoothingFactor,
       );
 
-      const breath = Math.sin(t * 0.8) * 0.02; // Slow sine wave
-      if (spine) spine.rotation.x = breath;
-      if (chest) chest.rotation.x = breath;
-      if (upperChest) upperChest.rotation.x = breath;
+      vrm.expressionManager.setValue("aa", ts.mouthTarget);
 
-      // 2. Subtle Sway (Hips/Root)
-      // Very slight figure-8 or side-to-side movement
+      // Emotion Blending (Optimized)
+      // Only update if changed or during transition
+      const emotionMap: Record<string, string> = {
+        happy: "happy",
+        angry: "angry",
+        sad: "sad",
+        surprised: "surprised",
+        relaxed: "relaxed",
+        neutral: "neutral",
+      };
+
+      for (const [key, name] of Object.entries(emotionMap)) {
+        if (name === "neutral") continue;
+        const isTarget = currentEmotion === key;
+        const currentVal = vrm.expressionManager.getValue(name) || 0;
+        const targetVal = isTarget ? 1.0 : 0.0;
+
+        // Stop calculating if we are already at target 0
+        if (Math.abs(currentVal - targetVal) > 0.001) {
+          const nextVal = THREE.MathUtils.lerp(
+            currentVal,
+            targetVal,
+            delta * 4,
+          );
+          vrm.expressionManager.setValue(name, nextVal);
+        }
+      }
+    }
+
+    // 3. LAYERED IDLE ANIMATIONS
+    // Using "naturalSine" to mix frequencies
+
+    // Breathing (Spine/Chest)
+    // Primary breath + subtle irregularity
+    const breath =
+      (Math.sin(t * 0.8) * 0.5 + Math.sin(t * 0.8 * 0.33) * 0.5) * 0.03;
+
+    const spine = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Spine);
+    const chest = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Chest);
+
+    if (isDancing) {
+        // --- DANCE ANIMATION ---
+        const danceSpeed = 5;
+        const danceBeat = t * danceSpeed;
+        
+        // Hips: Sway and bounce
+        const hips = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Hips);
+        
+        // Ensure initial rotations are zeroed out before applying dance moves to prevent accumulation
+        if (hips) {
+            hips.rotation.set(0, 0, 0); 
+            // hips.position.set(0, Math.abs(Math.sin(danceBeat)) * 0.1, 0); // DISABLED: Causing position artifacts
+        }
+
+        // Spine/Chest: Counter rotation
+        if (spine) {
+            spine.rotation.set(0, 0, 0);
+            spine.rotation.y = Math.sin(danceBeat * 0.5 + Math.PI) * 0.05;
+        }
+        if (chest) {
+            chest.rotation.set(0, 0, 0);
+            chest.rotation.y = Math.sin(danceBeat * 0.5 + Math.PI) * 0.05;
+        }
+
+        // Arms: Pump in the air
+        const leftArm = humanBones.getNormalizedBoneNode(VRMHumanBoneName.LeftUpperArm);
+        const rightArm = humanBones.getNormalizedBoneNode(VRMHumanBoneName.RightUpperArm);
+        const leftLower = humanBones.getNormalizedBoneNode(VRMHumanBoneName.LeftLowerArm);
+        const rightLower = humanBones.getNormalizedBoneNode(VRMHumanBoneName.RightLowerArm);
+
+        // More stable arm rotations
+        if (leftArm) {
+             leftArm.rotation.set(0, 0, 0);
+             leftArm.rotation.z = Math.PI * 0.4; // Fixed raised position
+             leftArm.rotation.x = Math.sin(danceBeat) * 0.2; // Wave
+        }
+        if (rightArm) {
+             rightArm.rotation.set(0, 0, 0);
+             rightArm.rotation.z = -Math.PI * 0.4; // Fixed raised position
+             rightArm.rotation.x = Math.sin(danceBeat) * 0.2; // Wave
+        }
+        
+        if (leftLower) leftLower.rotation.set(0, 0, 0);
+        if (rightLower) rightLower.rotation.set(0, 0, 0);
+
+        // Head: Bob to the beat
+        const head = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Head);
+        if (head) {
+             head.rotation.set(0, 0, 0);
+             head.rotation.x = Math.abs(Math.sin(danceBeat)) * 0.1;
+        }
+
+    } else if (isJumping) {
+      // --- JUMP ANIMATION ---
+      const jumpSpeed = 5;
+      const jumpTime = t * jumpSpeed;
+      const jumpHeight = 0.5;
+
+      // Hips: Jump up and down
       const hips = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Hips);
       if (hips) {
-        // hips.rotation.y = Math.sin(t * 0.5) * 0.02; // Sway Y
-        // hips.position.y = Math.sin(t * 1.0) * 0.005; // Bob up/down slightly
+        hips.rotation.set(0, 0, 0);
+        // Use absolute sine wave for jumping (only goes up)
+        hips.position.y = Math.abs(Math.sin(jumpTime)) * jumpHeight;
       }
 
-      // 3. Arms Breathing (sync with chest)
-      // Base rotation is PI/3.0 (~1.04 rad)
-      const leftArm = humanBones.getNormalizedBoneNode(
+      // Arms: Raise slightly during jump
+      const leftArm = humanBones.getNormalizedBoneNode(VRMHumanBoneName.LeftUpperArm);
+      const rightArm = humanBones.getNormalizedBoneNode(VRMHumanBoneName.RightUpperArm);
+      
+      if (leftArm) {
+          leftArm.rotation.set(0, 0, 0);
+          leftArm.rotation.z = Math.PI * 0.4;
+      }
+      if (rightArm) {
+          rightArm.rotation.set(0, 0, 0);
+          rightArm.rotation.z = -Math.PI * 0.4;
+      }
+
+    } else if (isWaving) {
+       // --- WAVE ANIMATION ---
+       const waveSpeed = 8;
+       const waveTime = t * waveSpeed;
+
+       const rightArm = humanBones.getNormalizedBoneNode(VRMHumanBoneName.RightUpperArm);
+       const rightLower = humanBones.getNormalizedBoneNode(VRMHumanBoneName.RightLowerArm);
+       const rightHand = humanBones.getNormalizedBoneNode(VRMHumanBoneName.RightHand);
+
+       if (rightArm) {
+           rightArm.rotation.set(0, 0, 0);
+           rightArm.rotation.z = -Math.PI * 0.8; // Raised high
+           rightArm.rotation.x = Math.PI * 0.1; // Slightly forward
+       }
+
+       if (rightLower) {
+           rightLower.rotation.set(0, 0, 0);
+           rightLower.rotation.z = -Math.PI * 0.1 + Math.sin(waveTime) * 0.2; // Waving motion
+       }
+
+        if (rightHand) {
+           rightHand.rotation.set(0, 0, 0);
+           // Slight hand flourish
+           rightHand.rotation.x = Math.cos(waveTime) * 0.1;
+       }
+
+    } else {
+      // --- IDLE ANIMATION ---
+
+      // RESET JUMP/DANCE ARTIFACTS
+      const hips = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Hips);
+      if (hips) {
+        hips.rotation.set(0, 0, 0);
+        hips.position.y = 0; // Ensure we land back on ground
+      }
+        // Reset Y/Z rotations for spine/chest as idle only uses X
+        if (spine) {
+            spine.rotation.y = 0;
+            spine.rotation.z = 0;
+        }
+        if (chest) {
+            chest.rotation.y = 0;
+            chest.rotation.z = 0;
+        }
+
+        if (spine) spine.rotation.x = breath;
+        if (chest) chest.rotation.x = breath;
+
+        // Arms & Shoulders
+        // Base Rotation logic preserved but smoothed
+        const leftArm = humanBones.getNormalizedBoneNode(
         VRMHumanBoneName.LeftUpperArm,
-      );
-      const rightArm = humanBones.getNormalizedBoneNode(
+        );
+        const rightArm = humanBones.getNormalizedBoneNode(
         VRMHumanBoneName.RightUpperArm,
-      );
-      const leftLowerArm = humanBones.getNormalizedBoneNode(
+        );
+        const leftLower = humanBones.getNormalizedBoneNode(
         VRMHumanBoneName.LeftLowerArm,
-      );
-      const rightLowerArm = humanBones.getNormalizedBoneNode(
+        );
+        const rightLower = humanBones.getNormalizedBoneNode(
         VRMHumanBoneName.RightLowerArm,
-      );
+        );
 
-      const armBreath = Math.sin(t * 0.8) * 0.03;
+        // Dynamic Arm Sway: More sway when talking, less when silent
+        const armSway = naturalSine(t, 1.5) * 0.02;
+        const talkLift = ts.intensity * 0.15; // Arms lift slightly when talking
 
-      // Talking gestures (arms)
-      // When talking, lift arms slightly and open them a bit more
-      const talkArmLift = ts.intensity * 0.1; // Lift arms by 0.1 rad
-      const talkArmOpen = Math.sin(t * 8) * 0.02 * ts.intensity; // Fast jitter/movement when talking
+        // A-Pose correction base (approx PI/3)
+        const armBaseZ = Math.PI / 2.8;
 
-      // Base: Math.PI / 3.0
-      if (leftArm)
-        leftArm.rotation.z =
-          Math.PI / 3.0 + armBreath - talkArmLift + talkArmOpen;
-      if (rightArm)
-        rightArm.rotation.z =
-          -(Math.PI / 3.0) - armBreath + talkArmLift - talkArmOpen;
+        if (leftArm) {
+        // Add slight Z breathing to shoulders
+        leftArm.rotation.z = armBaseZ + breath * 2 - talkLift + armSway;
+        // Slight x-rotation (forward/back) for natural stance
+        leftArm.rotation.x = 0.05;
+        }
+        if (rightArm) {
+        rightArm.rotation.z = -armBaseZ - breath * 2 + talkLift - armSway;
+        rightArm.rotation.x = 0.05;
+        }
 
-      // Forearms - slightly more expressive when talking
-      if (leftLowerArm) leftLowerArm.rotation.z = -0.1 - ts.intensity * 0.2;
-      if (rightLowerArm) rightLowerArm.rotation.z = 0.1 + ts.intensity * 0.2;
+        if (leftLower) leftLower.rotation.z = -0.15 - ts.intensity * 0.1;
+        if (rightLower) rightLower.rotation.z = 0.15 + ts.intensity * 0.1;
 
-      // 4. Head/Neck slight movement (Perlin noise-ish using mixed sines)
-      const head = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Head);
-      const neck = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Neck);
+        // HEAD & NECK
+        // This is where "robotic" feel usually comes from.
+        // We add a "Micro-movement" layer that is independent of breathing.
+        const head = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Head);
+        const neck = humanBones.getNormalizedBoneNode(VRMHumanBoneName.Neck);
 
-      const headX = Math.sin(t * 0.3) * 0.02 + Math.sin(t * 0.7) * 0.01;
-      const headY = Math.cos(t * 0.25) * 0.03;
+        const headX = naturalSine(t, 0.4) * 0.04; // Very slow nod
+        const headY = naturalSine(t, 0.25) * 0.05; // Very slow drift
 
-      // Talking head bob
-      // Faster, more rhythmic nodding when speaking
-      const talkBob = Math.abs(Math.sin(t * 12)) * 0.05 * ts.intensity;
+        // Talking bob - smoother, less "vibrating"
+        const talkBob = Math.sin(t * 10) * 0.03 * ts.intensity;
 
-      if (neck) {
-        neck.rotation.y = headY * 0.5;
-        neck.rotation.x = headX * 0.5 + talkBob * 0.5;
-      }
-      if (head) {
-        head.rotation.y = headY * 0.5;
-        head.rotation.x = headX * 0.5 + talkBob * 0.5;
-      }
+        if (neck) {
+        // Neck takes 40% of the rotation
+        neck.rotation.y = headY * 0.4;
+        neck.rotation.x = headX * 0.4 + talkBob * 0.3;
+        }
+        if (head) {
+        // Head takes 60% of the rotation
+        head.rotation.y = headY * 0.6;
+        head.rotation.x = headX * 0.6 + talkBob * 0.7;
 
-      vrm.update(delta);
+        // Add subtle "Attitude" tilt (Z-axis) based on sway
+        head.rotation.z = -headY * 0.2;
+        }
     }
+
+    // Update VRM Physics
+    vrm.update(delta);
   });
 
   if (!vrm) return null;

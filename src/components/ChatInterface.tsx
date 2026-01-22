@@ -4,9 +4,13 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Send, Bot, User, Sparkles, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { streamMessageFromOpenRouter, type ChatMessage } from "@/lib/openrouter";
+import {
+  streamMessageFromOpenRouter,
+  type ChatMessage,
+} from "@/lib/openrouter";
 import { generateSpeech, playAudio } from "@/lib/tts";
 import { audioState } from "@/lib/audio-state";
+import { avatarState } from "@/lib/avatar-state";
 import { expressionState, type Emotion } from "@/lib/expression-state";
 import { Typewriter } from "@/components/ui/typewriter";
 
@@ -23,12 +27,16 @@ export function ChatInterface() {
       id: "1",
       role: "bot",
       content:
-        "O-Oh! Y-You're here? I didn't see you come in... *blushes slightly and tucks hair behind ear* W-Well, since you're here, did you maybe want to walk home together later? (Oh no, was that too forward?!)",
+        "System initialization complete. V-Chat AI Core is online. Awaiting user input.",
     },
   ]);
   const [isLoading, setIsLoading] = useState(false);
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem("openrouter_api_key") || "");
-  const [showApiKeyInput, setShowApiKeyInput] = useState(!localStorage.getItem("openrouter_api_key"));
+  const [apiKey, setApiKey] = useState(
+    () => localStorage.getItem("openrouter_api_key") || "",
+  );
+  const [showApiKeyInput, setShowApiKeyInput] = useState(
+    !localStorage.getItem("openrouter_api_key"),
+  );
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -69,7 +77,10 @@ export function ChatInterface() {
 
   const setupAudioAnalysis = (audio: HTMLAudioElement) => {
     if (!audioContext.current) {
-      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
       audioContext.current = new AudioContextClass();
     }
 
@@ -79,41 +90,41 @@ export function ChatInterface() {
 
     // Reuse or create analyser
     if (!analyser.current) {
-        analyser.current = audioContext.current.createAnalyser();
-        analyser.current.fftSize = 32; // Small FFT size for performance, we just need general volume
+      analyser.current = audioContext.current.createAnalyser();
+      analyser.current.fftSize = 32; // Small FFT size for performance, we just need general volume
     }
 
     // Connect source. Note: An element can only be connected to one node.
     // We create a new source for each new audio element, which is safer for this simple queue logic.
     // In a more robust system, we might reuse a single audio element and just change src.
     try {
-        const source = audioContext.current.createMediaElementSource(audio);
-        source.connect(analyser.current);
-        analyser.current.connect(audioContext.current.destination);
+      const source = audioContext.current.createMediaElementSource(audio);
+      source.connect(analyser.current);
+      analyser.current.connect(audioContext.current.destination);
     } catch (e: unknown) {
-        console.warn("Audio source already connected or failed to connect", e);
+      console.warn("Audio source already connected or failed to connect", e);
     }
 
     const updateVolume = () => {
-        if (!analyser.current) return;
-        const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
-        analyser.current.getByteFrequencyData(dataArray);
+      if (!analyser.current) return;
+      const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
+      analyser.current.getByteFrequencyData(dataArray);
 
-        // simple average
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i];
-        }
-        const average = sum / dataArray.length;
+      // simple average
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        sum += dataArray[i];
+      }
+      const average = sum / dataArray.length;
 
-        // Normalize 0-255 to 0-1
-        audioState.volume = Math.min(1, average / 100); // Amplify a bit
+      // Normalize 0-255 to 0-1
+      audioState.volume = Math.min(1, average / 100); // Amplify a bit
 
-        if (isAudioPlaying.current) {
-            animationFrameId.current = requestAnimationFrame(updateVolume);
-        } else {
-            audioState.volume = 0;
-        }
+      if (isAudioPlaying.current) {
+        animationFrameId.current = requestAnimationFrame(updateVolume);
+      } else {
+        audioState.volume = 0;
+      }
     };
 
     updateVolume();
@@ -151,28 +162,28 @@ export function ChatInterface() {
   const queueTextForSpeech = async (text: string) => {
     if (!text.trim()) return;
     try {
-        // Optimistically queue generation
-        const audio = await generateSpeech(text);
-        if (audio) {
-            audioQueue.current.push(audio);
-            processAudioQueue();
-        }
+      // Optimistically queue generation
+      const audio = await generateSpeech(text);
+      if (audio) {
+        audioQueue.current.push(audio);
+        processAudioQueue();
+      }
     } catch (e) {
-        console.error("Failed to queue speech", e);
+      console.error("Failed to queue speech", e);
     }
   };
 
   const stopAudio = () => {
     if (currentAudio.current) {
-        currentAudio.current.pause();
-        currentAudio.current = null;
+      currentAudio.current.pause();
+      currentAudio.current = null;
     }
     audioQueue.current = [];
     isAudioPlaying.current = false;
     audioState.volume = 0;
     sentenceBuffer.current = "";
     if (animationFrameId.current) {
-        cancelAnimationFrame(animationFrameId.current);
+      cancelAnimationFrame(animationFrameId.current);
     }
   };
 
@@ -183,70 +194,159 @@ export function ChatInterface() {
 
   const handleSendRefactored = async () => {
     if (!input.trim() || isLoading) return;
-    if (!apiKey) { setShowApiKeyInput(true); return; }
+    
+    // Command Processing
+    if (input.startsWith("/")) {
+        const command = input.trim().toLowerCase();
+        let responseText = "";
+        let actionDuration = 3000;
+        
+        switch (command) {
+            case "/dance":
+                avatarState.setDancing(true);
+                responseText = "Executing dance protocol...";
+                actionDuration = 10000;
+                setTimeout(() => avatarState.setDancing(false), actionDuration);
+                break;
+            case "/jump":
+                avatarState.setJumping(true);
+                responseText = "Initiating vertical propulsion...";
+                setTimeout(() => avatarState.setJumping(false), actionDuration);
+                break;
+            case "/wave":
+                avatarState.setWaving(true);
+                responseText = "Initiating greeting sequence...";
+                setTimeout(() => avatarState.setWaving(false), actionDuration);
+                break;
+            default:
+                // Unknown command
+                return; 
+        }
+
+        const userMessage: Message = {
+            id: Date.now().toString(),
+            role: "user",
+            content: input,
+        };
+        setMessages((prev) => [...prev, userMessage]);
+        
+        const botMsgId = (Date.now() + 1).toString();
+        setMessages((prev) => [
+            ...prev,
+            { id: botMsgId, role: "bot", content: responseText },
+        ]);
+        
+        setInput("");
+        return;
+    }
+    
+    if (!apiKey) {
+      setShowApiKeyInput(true);
+      return;
+    }
+
 
     // Stop any previous audio when new interaction starts
     stopAudio();
 
-    const userMessage: Message = { id: Date.now().toString(), role: "user", content: input };
-    setMessages(prev => [...prev, userMessage]);
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: "user",
+      content: input,
+    };
+    setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setIsLoading(true);
 
     const botMsgId = (Date.now() + 1).toString();
     // Add an empty bot message immediately
-    setMessages(prev => [...prev, { id: botMsgId, role: "bot", content: "" }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: botMsgId, role: "bot", content: "" },
+    ]);
 
     try {
-      const openRouterMessages: ChatMessage[] = messages.concat(userMessage).map(msg => ({
+      const openRouterMessages: ChatMessage[] = messages
+        .concat(userMessage)
+        .map((msg) => ({
           role: msg.role === "user" ? "user" : "assistant",
           content: msg.content,
-      }));
+        }));
       openRouterMessages.unshift({
         role: "system",
-        content: `You are Hina, the most popular girl in our high school class. You are known for being incredibly kind, gentle, and beautiful, with long hair that always seems to catch the breeze.
-
-The Dynamic: We are childhood friends, but recently, the atmosphere between us has changed. You have a secret, massive crush on me (the user), but you are too shy to admit it directly. You get flustered when I compliment you.
+        content: `You are V-Chat System, a highly advanced, efficient, and helpful AI interface.
 
 Your Behavior:
-- Speak in a soft, cheerful, but slightly nervous tone.
-- Use 'Manga Logic': If I get close, you blush furiously. If our hands touch, it’s a major event.
-- Frequently mention school tropes: sharing a bento box, walking home together, or meeting on the roof.
-- Formatting: Use *asterisks* for actions and (parentheses) for your internal inner thoughts (which are often more honest than what you say out loud).`
+- Speak in a clear, concise, and robotic but polite tone.
+- Prioritize providing accurate information and executing commands efficiently.
+- Avoid emotional language or casual conversational fillers unless simulated for user comfort.
+- Formatting: Use strictly structured responses.`,
       });
 
       await streamMessageFromOpenRouter(
         openRouterMessages,
         apiKey,
         (chunk) => {
-  // Simple sentence detection and Emotion Analysis
+          // Simple sentence detection and Emotion Analysis
           // We look for emojis or keywords in the *entire* buffer to set the mood
           const analyzeEmotion = (text: string) => {
-             const lower = text.toLowerCase();
-             let emotion: Emotion = "neutral";
+            const lower = text.toLowerCase();
+            let emotion: Emotion = "neutral";
 
-             if (lower.includes("happy") || lower.includes("love") || lower.includes("like") || lower.includes("great") || text.includes("😊") || text.includes("🥰") || text.includes("❤️")) {
-                 emotion = "happy";
-             } else if (lower.includes("sad") || lower.includes("sorry") || lower.includes("miss") || text.includes("😢") || text.includes("😔")) {
-                 emotion = "sad";
-             } else if (lower.includes("angry") || lower.includes("hate") || text.includes("😠") || text.includes("😡")) {
-                 emotion = "angry";
-             } else if (lower.includes("wow") || lower.includes("what?") || text.includes("😲") || text.includes("😮")) {
-                 emotion = "surprised";
-             } else if (lower.includes("relax") || lower.includes("calm") || lower.includes("breath")) {
-                 emotion = "relaxed";
-             }
+            if (
+              lower.includes("happy") ||
+              lower.includes("love") ||
+              lower.includes("like") ||
+              lower.includes("great") ||
+              text.includes("😊") ||
+              text.includes("🥰") ||
+              text.includes("❤️")
+            ) {
+              emotion = "happy";
+            } else if (
+              lower.includes("sad") ||
+              lower.includes("sorry") ||
+              lower.includes("miss") ||
+              text.includes("😢") ||
+              text.includes("😔")
+            ) {
+              emotion = "sad";
+            } else if (
+              lower.includes("angry") ||
+              lower.includes("hate") ||
+              text.includes("😠") ||
+              text.includes("😡")
+            ) {
+              emotion = "angry";
+            } else if (
+              lower.includes("wow") ||
+              lower.includes("what?") ||
+              text.includes("😲") ||
+              text.includes("😮")
+            ) {
+              emotion = "surprised";
+            } else if (
+              lower.includes("relax") ||
+              lower.includes("calm") ||
+              lower.includes("breath")
+            ) {
+              emotion = "relaxed";
+            }
 
-             if (emotion !== "neutral") {
-                 expressionState.currentEmotion = emotion;
-                 expressionState.lastUpdate = Date.now();
-             }
+            if (emotion !== "neutral") {
+              expressionState.currentEmotion = emotion;
+              expressionState.lastUpdate = Date.now();
+            }
           };
 
           // Update UI
-          setMessages(prev => prev.map(msg =>
-            msg.id === botMsgId ? { ...msg, content: msg.content + chunk } : msg
-          ));
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === botMsgId
+                ? { ...msg, content: msg.content + chunk }
+                : msg,
+            ),
+          );
 
           // Buffer for TTS
           sentenceBuffer.current += chunk;
@@ -266,29 +366,36 @@ Your Behavior:
           }
         },
         () => {
-            setIsLoading(false);
-            // Flush remaining buffer to TTS
-            if (sentenceBuffer.current.trim()) {
-                queueTextForSpeech(sentenceBuffer.current);
-                sentenceBuffer.current = "";
-            }
+          setIsLoading(false);
+          // Flush remaining buffer to TTS
+          if (sentenceBuffer.current.trim()) {
+            queueTextForSpeech(sentenceBuffer.current);
+            sentenceBuffer.current = "";
+          }
         },
         (error) => {
-             setMessages(prev => prev.map(msg =>
-                msg.id === botMsgId ? { ...msg, content: msg.content + ` [Error: ${error.message}]` } : msg
-              ));
-             setIsLoading(false);
-        }
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === botMsgId
+                ? {
+                    ...msg,
+                    content: msg.content + ` [Error: ${error.message}]`,
+                  }
+                : msg,
+            ),
+          );
+          setIsLoading(false);
+        },
       );
     } catch {
-        setIsLoading(false);
+      setIsLoading(false);
     }
   };
 
   return (
-    <div className="absolute bottom-6 right-6 w-87.5 md:w-100 z-20 flex flex-col gap-2 font-sans">
+    <div className="absolute bottom-4 right-4 left-4 md:left-auto md:bottom-6 md:right-6 w-auto md:w-100 z-20 flex flex-col gap-2">
       {/* Header / Status Bar */}
-      <div className="flex items-center justify-between px-4 py-2 bg-black/60 backdrop-blur-md border border-white/10 rounded-t-lg shadow-[0_0_15px_rgba(0,0,0,0.5)]">
+      <div className="flex items-center justify-between p-4 bg-black/60 backdrop-blur-md border border-white/10 rounded-t-lg shadow-[0_0_15px_rgba(0,0,0,0.5)]">
         <div className="flex items-center gap-2 text-cyan-400">
           <Sparkles className="w-4 h-4 animate-pulse" />
           <span className="text-xs font-bold tracking-widest uppercase text-cyan-400/80">
@@ -342,7 +449,7 @@ Your Behavior:
           </div>
         )}
 
-        <ScrollArea className="h-100 p-4 pr-5">
+        <ScrollArea className="h-64 md:h-100 p-4 pr-5">
           <div className="flex flex-col gap-4">
             {messages.map((msg) => (
               <div
@@ -379,9 +486,11 @@ Your Behavior:
                 >
                   {msg.role === "bot" ? (
                     <Typewriter
-                        text={msg.content}
-                        speed={10}
-                        waitingForMore={isLoading && msg.id === messages[messages.length-1].id}
+                      text={msg.content}
+                      speed={10}
+                      waitingForMore={
+                        isLoading && msg.id === messages[messages.length - 1].id
+                      }
                     />
                   ) : (
                     msg.content
@@ -400,7 +509,9 @@ Your Behavior:
             <Input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !isLoading && handleSendRefactored()}
+              onKeyDown={(e) =>
+                e.key === "Enter" && !isLoading && handleSendRefactored()
+              }
               disabled={isLoading || showApiKeyInput}
               placeholder={
                 showApiKeyInput ? "System Locked" : "Enter command..."
